@@ -72,6 +72,17 @@ function renderApp() {
               <span id="next-alarm-info">Active System Monitoring</span>
             </div>
           </div>
+          <!-- Nightstand / Keep Awake Control -->
+          <div style="margin-top: 1rem; display: flex; justify-content: center; gap: 0.75rem;">
+            <button id="btn-toggle-wake-lock" class="btn-secondary" style="font-size: 0.75rem; padding: 0.4rem 0.85rem; border-radius: 9999px;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+              <span id="wake-lock-label">Keep Screen Awake: ON</span>
+            </button>
+            <button id="btn-toggle-dim" class="btn-secondary" style="font-size: 0.75rem; padding: 0.4rem 0.85rem; border-radius: 9999px;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+              <span>Nightstand Dim</span>
+            </button>
+          </div>
         </div>
 
         <!-- 2-Column Responsive Layout -->
@@ -239,6 +250,41 @@ function attachMainEvents() {
       targetObjects = getTargetObjects();
       renderApp();
     });
+  });
+
+  // Screen Wake Lock Toggle
+  document.getElementById('btn-toggle-wake-lock')?.addEventListener('click', async () => {
+    const label = document.getElementById('wake-lock-label');
+    if (!wakeLockSentinel) {
+      try {
+        if ('wakeLock' in navigator) {
+          wakeLockSentinel = await navigator.wakeLock.request('screen');
+          wakeLockSentinel.addEventListener('release', () => {
+            wakeLockSentinel = null;
+            if (label) label.textContent = 'Keep Screen Awake: OFF';
+          });
+          if (label) label.textContent = 'Keep Screen Awake: ON';
+        } else {
+          alert('Screen Wake Lock is not supported on this browser.');
+        }
+      } catch (err) {
+        console.warn('Wake Lock error:', err);
+      }
+    } else {
+      wakeLockSentinel.release();
+      wakeLockSentinel = null;
+      if (label) label.textContent = 'Keep Screen Awake: OFF';
+    }
+  });
+
+  // Nightstand Dim Mode
+  document.getElementById('btn-toggle-dim')?.addEventListener('click', () => {
+    isDimmed = !isDimmed;
+    const wrapper = document.querySelector('.app-wrapper');
+    if (wrapper) {
+      wrapper.style.filter = isDimmed ? 'brightness(0.2)' : 'none';
+      wrapper.style.transition = 'filter 0.3s ease';
+    }
   });
 }
 
@@ -925,6 +971,7 @@ function startContinuousScanner(targetObj) {
       video.srcObject = s;
       video.play();
 
+      let consecutiveMatches = 0;
       scanInterval = setInterval(async () => {
         if (!video.videoWidth || !targetObj) return;
 
@@ -941,13 +988,22 @@ function startContinuousScanner(targetObj) {
         if (matchStatus) matchStatus.textContent = result.reason;
 
         if (result.isMatch) {
+          consecutiveMatches++;
           if (matchBar) matchBar.style.background = '#10b981';
-          clearInterval(scanInterval);
-          scanInterval = null;
-          if (stream) {
-            stream.getTracks().forEach(t => t.stop());
+          
+          // Require at least 2 consecutive positive scans (1 second of holding on target)
+          // to make 100% sure the user didn't accidentally flash a random bed sheet
+          if (consecutiveMatches >= 2) {
+            clearInterval(scanInterval);
+            scanInterval = null;
+            if (stream) {
+              stream.getTracks().forEach(t => t.stop());
+            }
+            onAlarmSuccessfullyDismissed(targetObj.name);
           }
-          onAlarmSuccessfullyDismissed(targetObj.name);
+        } else {
+          consecutiveMatches = 0;
+          if (matchBar) matchBar.style.background = '#ffffff';
         }
       }, 500);
     })

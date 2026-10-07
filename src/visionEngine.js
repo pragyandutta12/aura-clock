@@ -1,6 +1,5 @@
-// visionEngine.js - Client-side AI Object Recognition & Visual Signature Analysis
-// Uses TensorFlow.js COCO-SSD + Multichannel Color & Structural Edge Histograms
-// Ensures that verification matches accurately even with slight angle/lighting changes!
+// visionEngine.js - Client-Side AI Object Recognition & Visual Signature Analysis
+// Uses MobileNet / COCO-SSD + Multizone Structural Edge & Color Signatures
 
 let modelPromise = null;
 
@@ -16,7 +15,7 @@ export async function loadVisionModel() {
         return model;
       }
     } catch (err) {
-      console.warn('Failed to load COCO-SSD via CDN, fallback to color-structural feature matching:', err);
+      console.warn('Failed to load COCO-SSD via CDN:', err);
     }
     return null;
   })();
@@ -24,16 +23,15 @@ export async function loadVisionModel() {
   return modelPromise;
 }
 
-// Extract comprehensive features: COCO-SSD detected objects + Color & Texture Signature
+// Extract comprehensive features: COCO-SSD detected objects + 4-Zone Spatial Signatures
 export async function analyzeImage(imageElement) {
   let detectedObjects = [];
   try {
     const model = await loadVisionModel();
     if (model) {
       const predictions = await model.detect(imageElement);
-      // Sort predictions by confidence
       detectedObjects = predictions
-        .filter(p => p.score >= 0.3)
+        .filter(p => p.score >= 0.35)
         .map(p => ({
           class: p.class.toLowerCase(),
           score: Math.round(p.score * 100),
@@ -41,24 +39,24 @@ export async function analyzeImage(imageElement) {
         }));
     }
   } catch (err) {
-    console.warn('Object detection error, proceeding with visual histogram signature:', err);
+    console.warn('Object detection error:', err);
   }
 
-  // Compute visual signature (Color distribution + luminance contrast)
-  const visualSignature = computeVisualSignature(imageElement);
+  // Compute 4-zone spatial visual signature (Top-Left, Top-Right, Bottom-Left, Bottom-Right)
+  // This ensures that two completely different rooms/surfaces (bed vs desk) DO NOT falsely match!
+  const visualSignature = computeMultizoneSignature(imageElement);
 
   return {
     objects: detectedObjects,
     signature: visualSignature,
-    primaryLabel: detectedObjects.length > 0 ? detectedObjects[0].class : 'Distinct Object / Room Scene',
-    confidence: detectedObjects.length > 0 ? detectedObjects[0].score : 80
+    primaryLabel: detectedObjects.length > 0 ? detectedObjects[0].class : 'Physical Target / Scene',
+    confidence: detectedObjects.length > 0 ? detectedObjects[0].score : 75
   };
 }
 
-// Compute normalized color & luminance histogram (16 bins RGB + Grayscale contrast)
-function computeVisualSignature(imageElement) {
+// Compute multizone spatial histogram to prevent random false positive matches
+function computeMultizoneSignature(imageElement) {
   const canvas = document.createElement('canvas');
-  // Downsample to 64x64 for fast and scale/angle-invariant comparison
   const size = 64;
   canvas.width = size;
   canvas.height = size;
@@ -66,125 +64,137 @@ function computeVisualSignature(imageElement) {
   ctx.drawImage(imageElement, 0, 0, size, size);
 
   const imgData = ctx.getImageData(0, 0, size, size).data;
-  const numPixels = size * size;
+  
+  // Divide into 4 quadrants to maintain spatial awareness
+  // (0: Top-Left, 1: Top-Right, 2: Bottom-Left, 3: Bottom-Right)
+  const zones = [createZoneHist(), createZoneHist(), createZoneHist(), createZoneHist()];
+  const half = size / 2;
 
-  const rHist = new Float32Array(8);
-  const gHist = new Float32Array(8);
-  const bHist = new Float32Array(8);
-  let totalEdgeEnergy = 0;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const idx = (y * size + x) * 4;
+      const r = imgData[idx];
+      const g = imgData[idx + 1];
+      const b = imgData[idx + 2];
 
-  for (let i = 0; i < imgData.length; i += 4) {
-    const r = imgData[i];
-    const g = imgData[i + 1];
-    const b = imgData[i + 2];
+      const zoneIdx = (y < half ? 0 : 2) + (x < half ? 0 : 1);
+      const zone = zones[zoneIdx];
 
-    const rBin = Math.min(7, Math.floor(r / 32));
-    const gBin = Math.min(7, Math.floor(g / 32));
-    const bBin = Math.min(7, Math.floor(b / 32));
+      const rBin = Math.min(3, Math.floor(r / 64));
+      const gBin = Math.min(3, Math.floor(g / 64));
+      const bBin = Math.min(3, Math.floor(b / 64));
 
-    rHist[rBin]++;
-    gHist[gBin]++;
-    bHist[bBin]++;
+      zone.r[rBin]++;
+      zone.g[gBin]++;
+      zone.b[bBin]++;
 
-    // Simple pixel gradient energy for texture
-    if (i > 4) {
-      const prevL = (imgData[i - 4] * 0.299 + imgData[i - 3] * 0.587 + imgData[i - 2] * 0.114);
-      const curL = (r * 0.299 + g * 0.587 + b * 0.114);
-      totalEdgeEnergy += Math.abs(curL - prevL);
+      // Luminance
+      const lum = (r * 0.299 + g * 0.587 + b * 0.114);
+      zone.totalLum += lum;
     }
   }
 
-  // Normalize histograms
-  for (let b = 0; b < 8; b++) {
-    rHist[b] /= numPixels;
-    gHist[b] /= numPixels;
-    bHist[b] /= numPixels;
-  }
-  const avgEdge = totalEdgeEnergy / (numPixels * 255);
+  const pixelsPerZone = (size * size) / 4;
+  zones.forEach(z => {
+    for (let i = 0; i < 4; i++) {
+      z.r[i] /= pixelsPerZone;
+      z.g[i] /= pixelsPerZone;
+      z.b[i] /= pixelsPerZone;
+    }
+    z.avgLum = z.totalLum / (pixelsPerZone * 255);
+  });
 
+  return zones;
+}
+
+function createZoneHist() {
   return {
-    r: Array.from(rHist),
-    g: Array.from(gHist),
-    b: Array.from(bHist),
-    texture: avgEdge
+    r: new Float32Array(4),
+    g: new Float32Array(4),
+    b: new Float32Array(4),
+    totalLum: 0,
+    avgLum: 0
   };
 }
 
-// Compare target reference image analysis vs live camera feed analysis
-// Implements flexible matching so user does NOT get stuck if lighting/angle changes
+// Compare target reference image analysis vs live camera feed
 export function compareImageAnalysis(referenceData, liveData) {
-  let objectScore = 0;
-  let hasObjectMatch = false;
-  let matchedObjectName = '';
-
   const refObjects = referenceData.objects || [];
   const liveObjects = liveData.objects || [];
 
+  let hasExactClassMatch = false;
+  let matchedObjectName = '';
+
+  // Check if AI recognizes the exact same object class
   if (refObjects.length > 0 && liveObjects.length > 0) {
-    const refClassSet = new Map();
-    refObjects.forEach(o => {
-      refClassSet.set(o.class, Math.max(refClassSet.get(o.class) || 0, o.score));
-    });
-
-    for (const liveObj of liveObjects) {
-      if (refClassSet.has(liveObj.class)) {
-        hasObjectMatch = true;
-        matchedObjectName = liveObj.class;
-        // High confidence match when recognized object aligns
-        objectScore = Math.max(objectScore, 0.85);
-        break;
+    for (const refObj of refObjects) {
+      for (const liveObj of liveObjects) {
+        if (refObj.class === liveObj.class) {
+          hasExactClassMatch = true;
+          matchedObjectName = liveObj.class;
+          break;
+        }
       }
+      if (hasExactClassMatch) break;
     }
   }
 
-  // Compare visual histograms (Bhattacharyya coefficient similarity)
-  const refSig = referenceData.signature;
-  const liveSig = liveData.signature;
+  // Calculate spatial multizone similarity (Bhattacharyya coefficient)
+  const refZones = referenceData.signature;
+  const liveZones = liveData.signature;
 
-  let colorSimilarity = 0;
-  if (refSig && liveSig) {
-    let rSum = 0, gSum = 0, bSum = 0;
-    for (let i = 0; i < 8; i++) {
-      rSum += Math.sqrt((refSig.r[i] || 0) * (liveSig.r[i] || 0));
-      gSum += Math.sqrt((refSig.g[i] || 0) * (liveSig.g[i] || 0));
-      bSum += Math.sqrt((refSig.b[i] || 0) * (liveSig.b[i] || 0));
+  let zoneSimilarity = 0;
+  if (refZones && liveZones && refZones.length === 4 && liveZones.length === 4) {
+    let totalScore = 0;
+    for (let z = 0; z < 4; z++) {
+      const rZ = refZones[z];
+      const lZ = liveZones[z];
+      let rS = 0, gS = 0, bS = 0;
+      for (let b = 0; b < 4; b++) {
+        rS += Math.sqrt((rZ.r[b] || 0) * (lZ.r[b] || 0));
+        gS += Math.sqrt((rZ.g[b] || 0) * (lZ.g[b] || 0));
+        bS += Math.sqrt((rZ.b[b] || 0) * (lZ.b[b] || 0));
+      }
+      const colorSim = (rS + gS + bS) / 3;
+      const lumDiff = Math.abs((rZ.avgLum || 0) - (lZ.avgLum || 0));
+      const lumSim = Math.max(0, 1 - lumDiff * 1.5);
+
+      totalScore += (colorSim * 0.7 + lumSim * 0.3);
     }
-    colorSimilarity = (rSum + gSum + bSum) / 3;
-
-    // Texture similarity
-    const textureDiff = Math.abs((refSig.texture || 0) - (liveSig.texture || 0));
-    const textureSim = Math.max(0, 1 - textureDiff * 2);
-
-    colorSimilarity = colorSimilarity * 0.75 + textureSim * 0.25;
+    zoneSimilarity = totalScore / 4;
   }
 
-  // Combined score calculation:
-  // If AI detected the same object (e.g. laptop, chair, bottle, cell phone, tv, bed, potted plant),
-  // then even if lighting differs, it passes easily!
-  // If object detection is indeterminate, it uses lenient color/scene similarity.
-  let overallScore = 0;
+  let finalScore = 0;
   let reason = '';
 
-  if (hasObjectMatch) {
-    overallScore = 0.55 * objectScore + 0.45 * colorSimilarity;
-    // Boost score for confirmed object class match
-    overallScore = Math.min(1.0, overallScore + 0.20);
-    reason = `AI identified matching ${matchedObjectName.toUpperCase()}`;
+  if (hasExactClassMatch) {
+    // If the registered object was e.g. "laptop" or "chair" or "bottle",
+    // and the camera sees a "laptop", combine class presence + visual layout.
+    // This allows varying camera angles while requiring the actual object to be in frame!
+    finalScore = 0.50 + (zoneSimilarity * 0.45);
+    finalScore = Math.min(1.0, finalScore);
+    reason = `AI identified target: ${matchedObjectName.toUpperCase()}`;
+  } else if (refObjects.length > 0) {
+    // A specific object was registered (e.g. laptop), but the camera sees something else (e.g. bed/pillow)
+    // Penality applied so wrong objects in your bed CANNOT dismiss your desk target!
+    finalScore = zoneSimilarity * 0.55;
+    reason = `Searching for registered object...`;
   } else {
-    // If no distinct object classification or different class, rely on scene signature
-    overallScore = colorSimilarity;
-    reason = colorSimilarity > 0.65 ? 'Visual scene layout matched' : 'Searching for target object...';
+    // Scene-based matching: Requires high spatial layout match
+    finalScore = zoneSimilarity;
+    reason = zoneSimilarity >= 0.75 ? `Target scene pattern recognized` : `Looking for target location...`;
   }
 
-  // Threshold: 0.65 is forgiving enough for different angles/lighting while preventing random pointing
-  const matchThreshold = 0.65;
-  const isMatch = overallScore >= matchThreshold;
+  // Strict Threshold:
+  // Requires 0.78 match score so pointing at a bed or floor will NEVER trigger!
+  const requiredThreshold = 0.78;
+  const isMatch = finalScore >= requiredThreshold;
 
   return {
     isMatch,
-    score: Math.round(overallScore * 100),
-    threshold: Math.round(matchThreshold * 100),
-    hasObjectMatch,
+    score: Math.round(finalScore * 100),
+    threshold: Math.round(requiredThreshold * 100),
+    hasExactClassMatch,
     matchedObjectName,
     reason
   };
